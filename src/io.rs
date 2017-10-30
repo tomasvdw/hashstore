@@ -33,6 +33,7 @@ pub fn write_value<W: io::Write + io::Seek>(wr: &mut W, prefix: ValuePrefix, con
 pub fn read_value_start<R: io::Read + io::Seek>(rd: &mut R, ptr: ValuePtr, size_needed: Option<usize>)
     -> Result<(ValuePrefix, Vec<u8>), HashStoreError>
 {
+    // use either passed `size_needed` or estimate from ptr
     let read_size = size_needed.map_or_else(
         || ptr_size_est(ptr),
         |x| x + mem::size_of::<ValuePrefix>());

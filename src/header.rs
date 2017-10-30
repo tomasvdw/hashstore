@@ -6,7 +6,7 @@ use std::io::{Read,Write};
 
 #[derive(Serialize, Deserialize, Copy,Clone)]
 pub struct Header {
-    magic_fileid: u64,
+    magic_file_id: u64,
     pub root_bits: u8,
     _reserved1: [u8;7],
     _reserved2: [u64;4]
@@ -20,7 +20,7 @@ impl Header {
 
     pub fn new(root_bits: u8) -> Self {
         Header {
-            magic_fileid: MAGIC_FILE_ID,
+            magic_file_id: MAGIC_FILE_ID,
             root_bits: root_bits,
             _reserved1: [0u8;7],
             _reserved2: [0u64;4],
@@ -28,7 +28,7 @@ impl Header {
     }
 
     pub fn is_correct_fileid(&self) -> bool {
-        self.magic_fileid == MAGIC_FILE_ID
+        self.magic_file_id == MAGIC_FILE_ID
     }
 
     pub fn read<R : Read>(rdr: &mut R) -> Result<Header, io::Error> {

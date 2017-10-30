@@ -5,8 +5,6 @@ use bincode;
 use std::sync::atomic;
 
 use std::{io, fs, mem, path};
-use std::io::{Write,Seek};
-
 use header;
 
 use io::*;
@@ -101,10 +99,7 @@ impl HashStore {
         let mut rw_file = fs::OpenOptions::new().read(true).write(true).open(&filename)?;
         let mmap_file = fs::OpenOptions::new().read(true).write(true).open(&filename)?;
         let append_file = fs::OpenOptions::new().append(true).open(&filename)?;
-        /*let buffer_file = fs::OpenOptions::new().append(true).open(&filename)?;
 
-        let buffer_file = io::BufWriter::new(buffer_file);
-*/
         // verify header
         let hdr = header::Header::read(&mut rw_file)?;
         let root_count = 1 << hdr.root_bits;
@@ -124,7 +119,7 @@ impl HashStore {
             8 * root_count
         )?;
 
-        let u64_ptr = unsafe { mmap.mut_ptr().offset(64) as *mut atomic::AtomicU64 };
+        let u64_ptr = mmap.mut_ptr() as *mut atomic::AtomicU64;
         let root_ptr = unsafe { ::std::slice::from_raw_parts(u64_ptr, root_count) };
 
         Ok(HashStore {
@@ -141,12 +136,12 @@ impl HashStore {
     ///
     /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
     /// `time < x` is encountered
-    pub fn exists(&mut self, key: [u8; 32], depth: SearchDepth) -> Result<Option<ValuePtr>, HashStoreError>
+    pub fn exists(&mut self, key: &[u8; 32], depth: SearchDepth) -> Result<Option<ValuePtr>, HashStoreError>
     {
-        let idx     = self.get_root_index(&key);
+        let idx     = get_root_index(self.root_bits, &key);
         let mut ptr = self.root[idx].load(atomic::Ordering::Relaxed);
 
-        // loop over linked list of value-objects at dataptr
+        // loop over linked list of value-objects at `ptr`
         loop {
 
             if ptr == 0 {
@@ -155,7 +150,7 @@ impl HashStore {
 
             let (prefix, _) = read_value_start(&mut self.rw_file, ptr, Some(0))?;
 
-            if prefix.key == key && !prefix.is_dependency{
+            if prefix.key == *key && !prefix.is_dependency{
                 return Ok(Some(ptr));
             }
 
@@ -173,9 +168,50 @@ impl HashStore {
     ///
     /// If `key` is not found, a dependency anchor is inserted at `key` which will prevent subsequent
     /// `set` of `key` to fail if the dependency isn't met.
-    pub fn get_dependency(&mut self, key: [u8; 32], dependent_on: [u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
+    pub fn get_dependency(&mut self, key: &[u8; 32], dependent_on: &[u8; 32], time: u32) -> Result<Option<Vec<u8>>, HashStoreError>
     {
-        unimplemented!()
+        let idx = get_root_index(self.root_bits, &key);
+
+        // Compare-and-swap loop
+        loop {
+            let first_ptr = self.root[idx].load(atomic::Ordering::Relaxed);
+            let mut ptr = first_ptr;
+
+            // loop over linked list of value-objects at dataptr
+            loop {
+                if ptr == 0 {
+                    break;
+                }
+
+                let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
+
+                if prefix.key == *key {
+                    read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
+                    return Ok(Some(value));
+                }
+
+                ptr = prefix.prev_pos;
+            }
+
+            // not found; try adding the dependency in the same CAS-loop
+            let prefix = ValuePrefix {
+                key: *key,
+                prev_pos: first_ptr,
+                time: time,
+                size: 32,
+                ..Default::default()
+            };
+
+            let new_dataptr = write_value(&mut self.append_file, prefix, &dependent_on[..])?;
+
+            let swap_dataptr = self.root[idx].compare_and_swap
+                (first_ptr, new_dataptr, atomic::Ordering::Relaxed);
+
+            if swap_dataptr == first_ptr {
+                return Ok(None);
+            }
+
+        }
     }
 
 
@@ -197,7 +233,8 @@ impl HashStore {
     /// `time < x` is encountered.
     pub fn get(&mut self, key: [u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
     {
-        let idx = self.get_root_index(&key);
+        let idx = get_root_index(self.root_bits, &key);
+
         let mut ptr = self.root[idx].load(atomic::Ordering::Relaxed);
 
         // loop over linked list of value-objects at dataptr
@@ -209,7 +246,7 @@ impl HashStore {
 
             let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
 
-            if prefix.key == key {
+            if prefix.key == key  && !prefix.is_dependency {
                 read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
                 return Ok(Some(value));
             }
@@ -237,7 +274,7 @@ impl HashStore {
                time: u32)
         -> Result<Option<ValuePtr>, HashStoreError>
     {
-        let idx = self.get_root_index(&key);
+        let idx = get_root_index(self.root_bits, &key);
 
         // Compare-and-swap loop
         loop {
@@ -286,50 +323,45 @@ impl HashStore {
     ///
     /// `time` can be any integer that roughly increases with time (eg a block height),
     /// and is used to query only recent keys
-    pub fn set_unchecked(&mut self, key: [u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
+    pub fn set_unchecked(&mut self, key: &[u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
     {
-        let idx = self.get_root_index(&key);
+        let idx = get_root_index(self.root_bits, key);
 
         // Compare-and-swap loop
         loop {
-            let old_dataptr = self.root[idx].load(atomic::Ordering::Relaxed);
+            let old_ptr = self.root[idx].load(atomic::Ordering::Relaxed);
 
             let prefix = ValuePrefix {
-                key: key,
-                prev_pos: old_dataptr,
+                key: *key,
+                prev_pos: old_ptr,
                 time: time,
                 size: value.len() as u32,
                 ..Default::default()
             };
 
-            let new_dataptr = write_value(&mut self.append_file, prefix, value)?;
+            let new_ptr = write_value(&mut self.append_file, prefix, value)?;
 
-            let swap_dataptr = self.root[idx].compare_and_swap
-                (old_dataptr, new_dataptr, atomic::Ordering::Relaxed);
+            let swap_ptr = self.root[idx].compare_and_swap
+                (old_ptr, new_ptr, atomic::Ordering::Relaxed);
 
-            if swap_dataptr == old_dataptr {
-                return Ok(new_dataptr);
+            if swap_ptr == old_ptr {
+                return Ok(new_ptr);
             }
             panic!("Hmm; not testing concurrency yet");
         }
     }
 
-    // Returns the index into the root hash table for a key
-    // This uses the first self.root_bits as index
-    fn get_root_index(&self, key: &[u8; 32]) -> usize {
-        let fullbytes = (self.root_bits / 8) as usize;
-        let partial_byte = fullbytes + 1;
-        let partial_mask = (1 << ( self.root_bits % 8)) - 1;
 
-        let first = & key[0..fullbytes]
-            .into_iter()
-            .enumerate()
-            .map(|(i, x)| ( *x as usize) << (8 * i))
-            .fold(0, |acc, x| acc | x);
+}
 
-        first | ((key[partial_byte] as usize) & partial_mask)
-    }
-
+// Returns the index into the root hash table for a key
+// This uses the first self.root_bits as index
+fn get_root_index(root_bits: u8, key: &[u8; 32]) -> usize {
+    let bits32 = ((key[0] as usize) << 24) |
+        ((key[1] as usize) << 16) |
+        ((key[2] as usize) << 8) |
+        (key[3] as usize);
+    bits32 >> (32 - root_bits)
 }
 
 
@@ -338,22 +370,7 @@ mod tests {
     extern crate rand;
 
     use super::*;
-    use std::collections::hash_map;
-    use std::time;
     use self::rand::Rng;
-
-    fn random_value<R : Rng>(rng: &mut R) -> Vec<u8> {
-
-        let size = if rng.next_u32() & 100 == 1 {
-            100 + (rng.next_u32() % 200_000)
-        }
-        else {
-            100 + (rng.next_u32() % 600)
-        };
-        let mut value = vec![0; size as usize];
-        rng.fill_bytes(&mut value);
-        value
-    }
 
     fn random_key<R: Rng>(rng: &mut R) -> [u8; 32] {
         let mut key = [0; 32];
@@ -361,60 +378,18 @@ mod tests {
         key
     }
 
-    fn ms(start: time::Instant) -> u64 {
-        let d = time::Instant::now() - start;
-        (d.as_secs() * 1000) as u64 + (d.subsec_nanos() / 1_000_000) as u64
-    }
-
-
     #[test]
-    fn base_test() {
-        let mut rng = rand::weak_rng();
-        let mut map_block1: hash_map::HashMap<[u8; 32], Vec<u8>> = hash_map::HashMap::new();
-        let p = "./tst";
-        let mut hs = HashStore::new(path::Path::new(p), 25).unwrap();
+    fn test_get_root_index() {
+        for _ in 0..100 {
+            let x = random_key(&mut rand::thread_rng());
 
-        let count1 = 2000;
-
-        let mut value = vec![0; 1_000_000 as usize];
-        rand::thread_rng().fill_bytes(&mut value);
-
-        println!("Block 1");
-
-        for _ in 0..2000 {
-            let k = random_key(&mut rng);
-            let v = random_value(&mut rng);
-
-            map_block1.insert(k, v.clone());
-            hs.set_unchecked(k, &v, 1).unwrap();
+            assert_eq!(get_root_index(2,&x), (x[0] as usize) >> 6 );
+            assert_eq!(get_root_index(6,&x), (x[0] as usize) >> 2 );
+            assert_eq!(get_root_index(8,&x), x[0] as usize );
+            assert_eq!(get_root_index(9,&x), ((x[0] as usize)<<1) | ((x[1]) as usize) >> 7);
         }
-        println!("10,000 blocks");
-        let tm = time::Instant::now();
-        for block in 2..102 {
-            for _ in 0..2000 {
-                let k = random_key(&mut rng);
-                let v = random_value(&mut rng);
-                hs.set_unchecked(k, &v, block).unwrap();
-            }
-        }
-
-        println!("10,000 blocks in {}ms", ms(tm));
-
-        let span = time::Instant::now() - tm;
-
-
-        let tm = time::Instant::now();
-        for (k, v) in map_block1.into_iter() {
-
-            let mut hsv = hs.get(k, SearchDepth::FullSearch).unwrap().unwrap();
-
-            assert!(hsv.len() >= v.len());
-
-            hsv.truncate(v.len());
-            assert!(hsv == v);
-        }
-        let span = time::Instant::now() - tm;
-        println!("Get {} in {:?}ms", count1, span.as_secs());
     }
-}
+
+    // Pub function tested in /tests
+ }
 
