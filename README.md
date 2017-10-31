@@ -27,7 +27,7 @@ The values form a LIFO linked list to resolve hash collisions.
     let hs = HashStore::new("myfile", 24).unwrap();
     
     // fast append (timestamp=10)
-    hs.set_unchecked(mykey1, myvalue1, 10).unwrap();
+    hs.set(mykey1, myvalue1, 10).unwrap();
 
     assert_eq!(hs.get(mykey1, SearchDepth::FullSearch).unwrap(), Some(myvalue1));
     

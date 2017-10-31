@@ -76,7 +76,7 @@ pub enum HashStoreSetResult {
 pub struct HashStore {
     // 3 handles to the same file
     _mmap_file: fs::File,
-    read_file: fs::File,
+    rw_file: fs::File,
     append_file: fs::File,
 
     // memory map to root table
@@ -114,12 +114,12 @@ impl HashStore {
         }
 
         // open 3 handles
-        let mut read_file = fs::OpenOptions::new().read(true).open(&file_name)?;
+        let mut rw_file   = fs::OpenOptions::new().read(true).write(true).open(&file_name)?;
         let mmap_file     = fs::OpenOptions::new().read(true).write(true).open(&file_name)?;
         let append_file   = fs::OpenOptions::new().append(true).open(&file_name)?;
 
         // verify header
-        let hdr = header::Header::read(&mut read_file)?;
+        let hdr = header::Header::read(&mut rw_file)?;
         let root_count = 1 << hdr.root_bits;
 
         if !hdr.is_correct_fileid() {
@@ -150,7 +150,7 @@ impl HashStore {
             _mmap_file: mmap_file,
             root: root,
             stats: stats,
-            read_file: read_file,
+            rw_file: rw_file,
             append_file: append_file,
             root_bits: root_bits,
         })
@@ -169,7 +169,7 @@ impl HashStore {
     }
 
 
-        /// Checks if `key` exists and returns a persistent pointer if it does
+    /// Checks if `key` exists and returns a persistent pointer if it does
     ///
     /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
     /// `time < x` is encountered
@@ -185,9 +185,9 @@ impl HashStore {
                 return Ok(None);
             }
 
-            let (prefix, _) = read_value_start(&mut self.read_file, ptr, Some(0))?;
+            let (prefix, _) = read_value_start(&mut self.rw_file, ptr, Some(0))?;
 
-            if prefix.key == *key && !prefix.is_dependency{
+            if prefix.key == *key {
                 return Ok(Some(ptr));
             }
 
@@ -198,60 +198,6 @@ impl HashStore {
         }
     }
 
-    /// Checks if `key` exists and returns the value if it does
-    ///
-    /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
-    /// `time < x` is encountered.
-    ///
-    /// If `key` is not found, a dependency anchor is inserted at `key` which will prevent subsequent
-    /// `set` of `key` to fail if the dependency isn't met.
-    pub fn get_dependency(&mut self, key: &[u8; 32], dependent_on: &[u8; 32], time: u32) -> Result<Option<Vec<u8>>, HashStoreError>
-    {
-        let idx = get_root_index(self.root_bits, &key);
-
-        // Compare-and-swap loop
-        loop {
-            let first_ptr = self.root[idx].load(atomic::Ordering::Relaxed);
-            let mut ptr = first_ptr;
-
-            // loop over linked list of value-objects at dataptr
-            loop {
-                if ptr == 0 {
-                    break;
-                }
-
-                let (prefix, mut value) = read_value_start(&mut self.read_file, ptr, None)?;
-
-                if prefix.key == *key {
-                    read_value_finish(&mut self.read_file, &prefix, &mut value)?;
-                    return Ok(Some(value));
-                }
-
-                ptr = prefix.prev_pos;
-            }
-
-            // not found; try adding the dependency in the same CAS-loop
-            let prefix = ValuePrefix {
-                key: *key,
-                prev_pos: first_ptr,
-                time: time,
-                size: 32,
-                ..Default::default()
-            };
-
-            let new_dataptr = write_value(&mut self.append_file, prefix, &dependent_on[..])?;
-
-            let swap_dataptr = self.root[idx].compare_and_swap
-                (first_ptr, new_dataptr, atomic::Ordering::Relaxed);
-
-            if swap_dataptr == first_ptr {
-                self.stats_add(HashStoreStats::Dependencies, 1);
-                return Ok(None);
-            }
-
-        }
-    }
-
 
     /// Directly reads the value pointed to by `ptr`
     ///
@@ -259,8 +205,8 @@ impl HashStore {
     /// If it is too small, a second read is performed
     pub fn get_by_ptr(&mut self, ptr: ValuePtr) -> Result<Vec<u8>, HashStoreError>
     {
-        let (prefix, mut content) = read_value_start(&mut self.read_file, ptr, None)?;
-        read_value_finish(&mut self.read_file, &prefix, &mut content)?;
+        let (prefix, mut content) = read_value_start(&mut self.rw_file, ptr, None)?;
+        read_value_finish(&mut self.rw_file, &prefix, &mut content)?;
         Ok(content)
     }
 
@@ -282,10 +228,10 @@ impl HashStore {
                 return Ok(None);
             }
 
-            let (prefix, mut value) = read_value_start(&mut self.read_file, ptr, None)?;
+            let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
 
-            if prefix.key == key  && !prefix.is_dependency {
-                read_value_finish(&mut self.read_file, &prefix, &mut value)?;
+            if prefix.key == key {
+                read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
                 return Ok(Some(value));
             }
 
@@ -297,76 +243,11 @@ impl HashStore {
         }
     }
 
-
     /// Stores `value` at `key`
-    ///
-    /// If there are any keys in the database that have `key` as dependency, the method will fail
-    /// if these are not passed in `solved_dependencies`
     ///
     /// `time` can be any integer that roughly increases with time (eg a block height),
     /// and is used to query only recent keys
-    pub fn set(&mut self,
-               key: &[u8; 32],
-               value: &[u8],
-               solved_dependencies: Vec<[u8; 32]>,
-               depth: SearchDepth,
-               time: u32)
-        -> Result<HashStoreSetResult, HashStoreError>
-    {
-        let idx = get_root_index(self.root_bits, &key);
-
-        // Compare-and-swap loop
-        loop {
-            let old_dataptr = self.root[idx].load(atomic::Ordering::Relaxed);
-
-            // check dependencies; loop over linked list of value-objects at ptr
-            let mut ptr = old_dataptr;
-            loop {
-                if ptr == 0 { break; }
-
-                let (prefix, content) = read_value_start(&mut self.read_file, ptr, Some(32))?;
-                if &prefix.key[..] == key && prefix.is_dependency {
-                    // unmet dependency?
-                    if !solved_dependencies.iter().any(|x| x == &content[..]) {
-                        let mut key_as_arr = [0u8;32];
-                        key_as_arr.copy_from_slice(&content[..]);
-                        return Ok(HashStoreSetResult::UnmetDependency(key_as_arr));
-                    }
-                }
-
-                if !depth.check(prefix.time) { break };
-
-                ptr = prefix.prev_pos;
-            }
-
-
-            let prefix = ValuePrefix {
-                key: *key,
-                prev_pos: old_dataptr,
-                time: time,
-                size: value.len() as u32,
-                ..Default::default()
-            };
-
-            let new_dataptr = write_value(&mut self.append_file, prefix, value)?;
-
-            let swap_dataptr = self.root[idx].compare_and_swap
-                (old_dataptr, new_dataptr, atomic::Ordering::Relaxed);
-
-            if swap_dataptr == old_dataptr {
-                self.stats_add(HashStoreStats::Elements, 1);
-                self.stats_add(HashStoreStats::SolvedDependencies, solved_dependencies.len() as u64);
-                return Ok(HashStoreSetResult::Ok(new_dataptr));
-            }
-            panic!("Hmm; not testing concurrency yet");
-        }
-    }
-
-    /// Stores `value` at `key` without verifying any dependency
-    ///
-    /// `time` can be any integer that roughly increases with time (eg a block height),
-    /// and is used to que?ry only recent keys
-    pub fn set_unchecked(&mut self, key: &[u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
+    pub fn set(&mut self, key: &[u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
     {
         let idx = get_root_index(self.root_bits, key);
 
@@ -393,6 +274,21 @@ impl HashStore {
             }
             panic!("Hmm; not testing concurrency yet");
         }
+    }
+
+    /// Updates part of a value
+    ///
+    /// The concurrency model only allows updating each byte of a value to a
+    /// single determistic value. The caller must ensure this.
+    ///
+    /// Specifically, the caller must ensure that if it changes byte N to X, this
+    /// byte will never be changed to anything else than X, neither by the caller
+    /// not by any other process
+    ///
+    /// The caller must also ensure that the update is within the bounds of the value
+    pub fn update(&mut self, ptr: ValuePtr, value: &[u8], position: usize) -> Result<(), HashStoreError> {
+        update_value(&mut self.rw_file, ptr, value, position + mem::size_of::<header::Header>())?;
+        Ok(())
     }
 
     /// Flushes all pending writes to disk

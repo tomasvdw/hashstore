@@ -20,11 +20,9 @@ pub struct ValuePrefix {
     pub key: [u8; 32],
     pub prev_pos: u64,
     pub size: u32,
-    pub time: u32,
-    pub prev_time: u32,
-    pub is_dependency: bool,
-    pub _reserved: [u8;3]
+    pub time: u32
 }
+
 
 
 pub fn ptr_new(filepos: u64, sz: usize) -> ValuePtr {

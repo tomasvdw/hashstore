@@ -36,36 +36,14 @@ fn ms(start: Instant) -> u64 {
 
 
 #[test]
-fn test_dependency() {
-
-    let mut hs = HashStore::new_empty("./testdb/deps", 24).unwrap();
-
-    hs.set(&[1;32], &[2;8], vec![], SearchDepth::FullSearch, 10).unwrap();
-
-    // successful get dependency
-    assert!(hs.get_dependency(&[1;32], &[3;32], 10).unwrap().is_some());
-    assert!(hs.exists(&[1;32], SearchDepth::FullSearch).unwrap().is_some());
-    assert!(hs.exists(&[3;32], SearchDepth::FullSearch).unwrap().is_none());
-
-    // unsuccessful get dependency
-    assert!(hs.get_dependency(&[10;32], &[20;32], 10).unwrap().is_none());
-
-    // now set 11 should fail
-    //assert!(hs.set(&[10;32], &[11;8], vec![], SearchDepth::FullSearch, 10).unwrap().is_none());
-    //assert!(hs.set(&[10;32], &[11;8], vec![[20;32]], SearchDepth::FullSearch, 10).unwrap().is_some());
-
-}
-
-
-#[test]
 fn test_exists() {
 
     // we use a root hashtable of size one to test search depth
     let mut hs = HashStore::new_empty("./testdb/exists", 0).unwrap();
 
-    hs.set_unchecked(&[1;32], &[2;8], 10).unwrap();
-    hs.set_unchecked(&[3;32], &[4;8], 20).unwrap();
-    hs.set_unchecked(&[5;32], &[6;8], 30).unwrap();
+    hs.set(&[1;32], &[2;8], 10).unwrap();
+    hs.set(&[3;32], &[4;8], 20).unwrap();
+    hs.set(&[5;32], &[6;8], 30).unwrap();
 
     assert!(hs.exists(&[1;32], SearchDepth::FullSearch).unwrap().is_some());
 
@@ -97,7 +75,7 @@ fn test_big() {
         let k1 = random_key(&mut rng);
         let v1 = random_value(&mut rng);
         block1.insert(k1, v1.clone());
-        hs.set_unchecked(&k1, &v1, 1).unwrap();
+        hs.set(&k1, &v1, 1).unwrap();
     }
     let b1 = block1.clone();
     let l = block1.len();
@@ -116,7 +94,7 @@ fn test_big() {
         for _ in 0..2000 {
             let k = random_key(&mut rng);
             let v = random_value(&mut rng);
-            hs.set_unchecked(&k, &v, block).unwrap();
+            hs.set(&k, &v, block).unwrap();
         }
     }
 
@@ -135,7 +113,7 @@ fn test_big() {
         let k1 = random_key(&mut rng);
         let v1 = random_value(&mut rng);
         blockend.insert(k1, v1.clone());
-        hs.set_unchecked(&k1, &v1, 1).unwrap();
+        hs.set(&k1, &v1, 1).unwrap();
     }
     println!("Block-end loaded");
 

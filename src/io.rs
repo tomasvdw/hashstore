@@ -14,7 +14,7 @@ pub fn write_value<W: io::Write + io::Seek>(wr: &mut W, prefix: ValuePrefix, con
     -> Result<ValuePtr, HashStoreError>
 {
 
-    let mut buffer: Vec<u8> = /*vec![0u8;mem::size_of::<ValuePrefix>()]; */ bincode::serialize(&prefix, bincode::Infinite)?;
+    let mut buffer: Vec<u8> = bincode::serialize(&prefix, bincode::Infinite)?;
     debug_assert!(buffer.len() == mem::size_of::<ValuePrefix>());
     buffer.extend_from_slice(content);
 
@@ -24,6 +24,16 @@ pub fn write_value<W: io::Write + io::Seek>(wr: &mut W, prefix: ValuePrefix, con
         - buffer.len() as u64;
 
     Ok(ptr_new(new_pos, buffer.len()))
+}
+
+// Writes part of a value
+pub fn update_value<W: io::Write + io::Seek>(wr: &mut W, ptr: ValuePtr, content: &[u8], position: usize)
+    -> Result<(), HashStoreError>
+{
+    wr.seek(io::SeekFrom::Start(ptr_file_pos(ptr) + position as u64))?;
+    wr.write_all(content)?;
+
+    Ok(())
 }
 
 
