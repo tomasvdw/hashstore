@@ -57,6 +57,13 @@ enum HashStoreStats {
     SolvedDependencies = 2
 }
 
+pub enum HashStoreSetResult {
+    Ok(ValuePtr),
+    UnmetDependency([u8;32])
+
+}
+
+
 
 /// Handle to a hashstore database
 ///
@@ -290,6 +297,7 @@ impl HashStore {
         }
     }
 
+
     /// Stores `value` at `key`
     ///
     /// If there are any keys in the database that have `key` as dependency, the method will fail
@@ -303,7 +311,7 @@ impl HashStore {
                solved_dependencies: Vec<[u8; 32]>,
                depth: SearchDepth,
                time: u32)
-        -> Result<Option<ValuePtr>, HashStoreError>
+        -> Result<HashStoreSetResult, HashStoreError>
     {
         let idx = get_root_index(self.root_bits, &key);
 
@@ -320,7 +328,9 @@ impl HashStore {
                 if &prefix.key[..] == key && prefix.is_dependency {
                     // unmet dependency?
                     if !solved_dependencies.iter().any(|x| x == &content[..]) {
-                        return Ok(None);
+                        let mut key_as_arr = [0u8;32];
+                        key_as_arr.copy_from_slice(&content[..]);
+                        return Ok(HashStoreSetResult::UnmetDependency(key_as_arr));
                     }
                 }
 
@@ -346,7 +356,7 @@ impl HashStore {
             if swap_dataptr == old_dataptr {
                 self.stats_add(HashStoreStats::Elements, 1);
                 self.stats_add(HashStoreStats::SolvedDependencies, solved_dependencies.len() as u64);
-                return Ok(Some(new_dataptr));
+                return Ok(HashStoreSetResult::Ok(new_dataptr));
             }
             panic!("Hmm; not testing concurrency yet");
         }
