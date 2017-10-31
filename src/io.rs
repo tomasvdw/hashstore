@@ -109,8 +109,9 @@ mod tests {
 
     #[test]
     fn test_io() {
-        let mut fr = fs::OpenOptions::new().write(true).read(true).create(true).open("tst-io").unwrap();
-        let mut fw = fs::OpenOptions::new().append(true).open("tst-io").unwrap();
+        fs::create_dir_all("testdb").unwrap();
+        let mut fr = fs::OpenOptions::new().write(true).read(true).create(true).open("./testdb/io").unwrap();
+        let mut fw = fs::OpenOptions::new().append(true).open("./testdb/io").unwrap();
 
         // small power of two should work in one go
         let (ptr, v) = do_write(&mut fw, 256 - ::std::mem::size_of::<ValuePrefix>());

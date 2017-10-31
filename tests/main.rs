@@ -6,7 +6,6 @@ extern crate rand;
 use hashstore::*;
 use std::time::{Instant};
 use std::collections::HashMap;
-use std::{fs,path};
 
 use self::rand::Rng;
 
@@ -39,7 +38,7 @@ fn ms(start: Instant) -> u64 {
 #[test]
 fn test_dependency() {
 
-    let mut hs = HashStore::new("./tmp-deps", 24).unwrap();
+    let mut hs = HashStore::new_empty("./testdb/deps", 24).unwrap();
 
     hs.set(&[1;32], &[2;8], vec![], SearchDepth::FullSearch, 10).unwrap();
 
@@ -48,18 +47,21 @@ fn test_dependency() {
     assert!(hs.exists(&[1;32], SearchDepth::FullSearch).unwrap().is_some());
     assert!(hs.exists(&[3;32], SearchDepth::FullSearch).unwrap().is_none());
 
+    // unsuccessful get dependency
+    assert!(hs.get_dependency(&[10;32], &[20;32], 10).unwrap().is_none());
+
+    // now set 11 should fail
+    //assert!(hs.set(&[10;32], &[11;8], vec![], SearchDepth::FullSearch, 10).unwrap().is_none());
+    //assert!(hs.set(&[10;32], &[11;8], vec![[20;32]], SearchDepth::FullSearch, 10).unwrap().is_some());
 
 }
 
 
 #[test]
 fn test_exists() {
-    let p = path::Path::new("./tst-exists");
-    if p.exists() {
-        fs::remove_file(p).unwrap();
-    }
+
     // we use a root hashtable of size one to test search depth
-    let mut hs = HashStore::new(p, 0).unwrap();
+    let mut hs = HashStore::new_empty("./testdb/exists", 0).unwrap();
 
     hs.set_unchecked(&[1;32], &[2;8], 10).unwrap();
     hs.set_unchecked(&[3;32], &[4;8], 20).unwrap();
@@ -83,7 +85,7 @@ fn test_exists() {
 #[ignore]
 fn test_big() {
     let mut rng = rand::weak_rng();
-    let mut hs = HashStore::new("./tmp-big", 26).unwrap();
+    let mut hs = HashStore::new_empty("./testdb/big", 26).unwrap();
 
     let mut block1 = HashMap::new();
     let mut blockend = HashMap::new();

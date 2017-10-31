@@ -4,16 +4,25 @@ use bincode;
 use std::io;
 use std::io::{Read,Write};
 
+
+
 #[derive(Serialize, Deserialize, Copy,Clone)]
 pub struct Header {
     magic_file_id: u64,
     pub root_bits: u8,
-    _reserved1: [u8;7],
-    _reserved2: [u64;4]
-
+    _reserved: [u8;7],
+    pub stats: [u64;8]
 }
 
 pub const MAGIC_FILE_ID: u64 = 0x485348_53544f5231;
+
+pub fn header_size_u64() -> usize {
+    return ::std::mem::size_of::<Header>() / 8;
+}
+
+pub fn stats_offset_u64() -> usize {
+    return 2; // field offset of stats
+}
 
 
 impl Header {
@@ -22,10 +31,11 @@ impl Header {
         Header {
             magic_file_id: MAGIC_FILE_ID,
             root_bits: root_bits,
-            _reserved1: [0u8;7],
-            _reserved2: [0u64;4],
+            _reserved: [0u8;7],
+            stats: [0;8]
         }
     }
+
 
     pub fn is_correct_fileid(&self) -> bool {
         self.magic_file_id == MAGIC_FILE_ID

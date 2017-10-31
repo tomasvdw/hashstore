@@ -5,6 +5,7 @@ use bincode;
 use std::sync::atomic;
 
 use std::{io, fs, mem, path};
+use std::io::Write;
 use header;
 
 use io::*;
@@ -50,6 +51,13 @@ impl SearchDepth {
     }
 }
 
+enum HashStoreStats {
+    Elements = 0,
+    Dependencies = 1,
+    SolvedDependencies = 2
+}
+
+
 /// Handle to a hashstore database
 ///
 /// This provides get and set operations
@@ -61,16 +69,15 @@ impl SearchDepth {
 pub struct HashStore {
     // 3 handles to the same file
     _mmap_file: fs::File,
-    rw_file: fs::File,
+    read_file: fs::File,
     append_file: fs::File,
 
     // memory map to root table
     _mmap: memmap::Mmap,
     root: &'static [atomic::AtomicU64],
+    stats: &'static [atomic::AtomicU64],
 
     root_bits: u8,
-
-
 }
 
 
@@ -82,12 +89,16 @@ impl HashStore {
     /// `root_bits` is the number of bits of each key that are used for the root hash table
     ///
     pub fn new<P : AsRef<path::Path>>(filename: P, root_bits: u8) -> Result<HashStore, HashStoreError> {
-        let filename = filename.as_ref();
-        if !filename.exists() {
+        let file_name = filename.as_ref();
+        if !file_name.exists() {
+            // create path
+            if let Some(dir) = file_name.parent() {
+                fs::create_dir_all(dir)?;
+            };
 
             // create new file
             let hdr = header::Header::new(root_bits);
-            let mut f = fs::File::create(&filename)?;
+            let mut f = fs::File::create(&file_name)?;
 
             header::Header::write(&mut f, &hdr)?;
 
@@ -96,12 +107,12 @@ impl HashStore {
         }
 
         // open 3 handles
-        let mut rw_file = fs::OpenOptions::new().read(true).write(true).open(&filename)?;
-        let mmap_file = fs::OpenOptions::new().read(true).write(true).open(&filename)?;
-        let append_file = fs::OpenOptions::new().append(true).open(&filename)?;
+        let mut read_file = fs::OpenOptions::new().read(true).open(&file_name)?;
+        let mmap_file     = fs::OpenOptions::new().read(true).write(true).open(&file_name)?;
+        let append_file   = fs::OpenOptions::new().append(true).open(&file_name)?;
 
         // verify header
-        let hdr = header::Header::read(&mut rw_file)?;
+        let hdr = header::Header::read(&mut read_file)?;
         let root_count = 1 << hdr.root_bits;
 
         if !hdr.is_correct_fileid() {
@@ -115,24 +126,43 @@ impl HashStore {
         let mut mmap = memmap::Mmap::open_with_offset(
             &mmap_file,
             memmap::Protection::ReadWrite,
-            mem::size_of::<header::Header>(),
-            8 * root_count
+            0,
+            mem::size_of::<header::Header>() + 8 * root_count
         )?;
 
+
         let u64_ptr = mmap.mut_ptr() as *mut atomic::AtomicU64;
-        let root_ptr = unsafe { ::std::slice::from_raw_parts(u64_ptr, root_count) };
+        let u64_slice = unsafe { ::std::slice::from_raw_parts(u64_ptr, root_count + header::header_size_u64()) };
+
+        // split our memmap in the root hash-table and stats
+        let root = &u64_slice[header::header_size_u64()..];
+        let stats = &u64_slice[header::stats_offset_u64()..(header::header_size_u64() - header::stats_offset_u64())];
 
         Ok(HashStore {
             _mmap: mmap,
             _mmap_file: mmap_file,
-            root: root_ptr,
-            rw_file: rw_file,
+            root: root,
+            stats: stats,
+            read_file: read_file,
             append_file: append_file,
             root_bits: root_bits,
         })
     }
 
-    /// Checks if `key` exists and returns a persistent pointer if it does
+    /// Creates a hashstore, and clears it if it already exists
+    ///
+    /// `root_bits` is the number of bits of each key that are used for the root hash table
+    ///
+    pub fn new_empty<P : AsRef<path::Path>>(filename: P, root_bits: u8) -> Result<HashStore, HashStoreError> {
+        let p = filename.as_ref();
+        if p.exists() {
+            fs::remove_file(p).unwrap();
+        }
+        HashStore::new(p, root_bits)
+    }
+
+
+        /// Checks if `key` exists and returns a persistent pointer if it does
     ///
     /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
     /// `time < x` is encountered
@@ -148,7 +178,7 @@ impl HashStore {
                 return Ok(None);
             }
 
-            let (prefix, _) = read_value_start(&mut self.rw_file, ptr, Some(0))?;
+            let (prefix, _) = read_value_start(&mut self.read_file, ptr, Some(0))?;
 
             if prefix.key == *key && !prefix.is_dependency{
                 return Ok(Some(ptr));
@@ -183,10 +213,10 @@ impl HashStore {
                     break;
                 }
 
-                let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
+                let (prefix, mut value) = read_value_start(&mut self.read_file, ptr, None)?;
 
                 if prefix.key == *key {
-                    read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
+                    read_value_finish(&mut self.read_file, &prefix, &mut value)?;
                     return Ok(Some(value));
                 }
 
@@ -208,6 +238,7 @@ impl HashStore {
                 (first_ptr, new_dataptr, atomic::Ordering::Relaxed);
 
             if swap_dataptr == first_ptr {
+                self.stats_add(HashStoreStats::Dependencies, 1);
                 return Ok(None);
             }
 
@@ -221,8 +252,8 @@ impl HashStore {
     /// If it is too small, a second read is performed
     pub fn get_by_ptr(&mut self, ptr: ValuePtr) -> Result<Vec<u8>, HashStoreError>
     {
-        let (prefix, mut content) = read_value_start(&mut self.rw_file, ptr, None)?;
-        read_value_finish(&mut self.rw_file, &prefix, &mut content)?;
+        let (prefix, mut content) = read_value_start(&mut self.read_file, ptr, None)?;
+        read_value_finish(&mut self.read_file, &prefix, &mut content)?;
         Ok(content)
     }
 
@@ -244,10 +275,10 @@ impl HashStore {
                 return Ok(None);
             }
 
-            let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
+            let (prefix, mut value) = read_value_start(&mut self.read_file, ptr, None)?;
 
             if prefix.key == key  && !prefix.is_dependency {
-                read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
+                read_value_finish(&mut self.read_file, &prefix, &mut value)?;
                 return Ok(Some(value));
             }
 
@@ -285,7 +316,7 @@ impl HashStore {
             loop {
                 if ptr == 0 { break; }
 
-                let (prefix, content) = read_value_start(&mut self.rw_file, ptr, Some(32))?;
+                let (prefix, content) = read_value_start(&mut self.read_file, ptr, Some(32))?;
                 if &prefix.key[..] == key && prefix.is_dependency {
                     // unmet dependency?
                     if !solved_dependencies.iter().any(|x| x == &content[..]) {
@@ -313,6 +344,8 @@ impl HashStore {
                 (old_dataptr, new_dataptr, atomic::Ordering::Relaxed);
 
             if swap_dataptr == old_dataptr {
+                self.stats_add(HashStoreStats::Elements, 1);
+                self.stats_add(HashStoreStats::SolvedDependencies, solved_dependencies.len() as u64);
                 return Ok(Some(new_dataptr));
             }
             panic!("Hmm; not testing concurrency yet");
@@ -322,7 +355,7 @@ impl HashStore {
     /// Stores `value` at `key` without verifying any dependency
     ///
     /// `time` can be any integer that roughly increases with time (eg a block height),
-    /// and is used to query only recent keys
+    /// and is used to que?ry only recent keys
     pub fn set_unchecked(&mut self, key: &[u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
     {
         let idx = get_root_index(self.root_bits, key);
@@ -345,12 +378,33 @@ impl HashStore {
                 (old_ptr, new_ptr, atomic::Ordering::Relaxed);
 
             if swap_ptr == old_ptr {
+                self.stats_add(HashStoreStats::Elements, 1);
                 return Ok(new_ptr);
             }
             panic!("Hmm; not testing concurrency yet");
         }
     }
 
+    /// Flushes all pending writes to disk
+    pub fn flush(&mut self)  -> Result<(), HashStoreError> {
+        self.append_file.flush()?;
+        self._mmap.flush()?;
+        Ok(())
+    }
+
+
+    pub fn stats(&mut self) -> Result<Vec<u64>, HashStoreError> {
+        self.flush()?;
+        let mut stats: Vec<u64> = self.stats.iter().map(|x|
+            x.load(atomic::Ordering::Relaxed)).collect();
+        let metadata: fs::Metadata = self.append_file.metadata()?;
+        stats.push(metadata.len());
+        Ok(stats)
+    }
+
+    fn stats_add(&mut self, field: HashStoreStats, n: u64) {
+        self.stats[field as usize].fetch_add(n, atomic::Ordering::Relaxed);
+    }
 
 }
 
