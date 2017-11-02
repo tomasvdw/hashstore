@@ -57,12 +57,6 @@ enum HashStoreStats {
     SolvedDependencies = 2
 }
 
-pub enum HashStoreSetResult {
-    Ok(ValuePtr),
-    UnmetDependency([u8;32])
-
-}
-
 
 
 /// Handle to a hashstore database
@@ -75,14 +69,15 @@ pub enum HashStoreSetResult {
 ///
 pub struct HashStore {
     // 3 handles to the same file
-    _mmap_file: fs::File,
-    rw_file: fs::File,
+    _mmap_file:  fs::File,
+    rw_file:     fs::File,
     append_file: fs::File,
 
     // memory map to root table
     _mmap: memmap::Mmap,
-    root: &'static [atomic::AtomicU64],
-    stats: &'static [atomic::AtomicU64],
+    root:    &'static [atomic::AtomicU64],
+    stats:   &'static [atomic::AtomicU64],
+    extrema: &'static [atomic::AtomicU64],
 
     root_bits: u8,
 }
@@ -144,12 +139,14 @@ impl HashStore {
         // split our memmap in the root hash-table and stats
         let root = &u64_slice[header::header_size_u64()..];
         let stats = &u64_slice[header::stats_offset_u64()..(header::header_size_u64() - header::stats_offset_u64())];
+        let extrema = &u64_slice[header::extrema_offset_u64()..(header::stats_offset_u64() - header::extrema_offset_u64())];
 
         Ok(HashStore {
             _mmap: mmap,
             _mmap_file: mmap_file,
             root: root,
             stats: stats,
+            extrema: extrema,
             rw_file: rw_file,
             append_file: append_file,
             root_bits: root_bits,
@@ -279,7 +276,7 @@ impl HashStore {
     /// Updates part of a value
     ///
     /// The concurrency model only allows updating each byte of a value to a
-    /// single determistic value. The caller must ensure this.
+    /// single deterministic value. The caller must ensure this.
     ///
     /// Specifically, the caller must ensure that if it changes byte N to X, this
     /// byte will never be changed to anything else than X, neither by the caller
@@ -289,6 +286,33 @@ impl HashStore {
     pub fn update(&mut self, ptr: ValuePtr, value: &[u8], position: usize) -> Result<(), HashStoreError> {
         update_value(&mut self.rw_file, ptr, value, position + mem::size_of::<header::Header>())?;
         Ok(())
+    }
+
+    /// Updates a 0-4 numbered extremum
+    ///
+    /// The comparison function will be called with the current extremum value.
+    /// If it returns true, the extremum will be set to ptr.
+    ///
+    /// The function may be called multiple times to resolvre concurrent updates in
+    /// the compare-and-swap loop
+    pub fn update_extremum<F>(&mut self, ptr: ValuePtr, extremum: usize, f: F) -> Result<(), HashStoreError>
+        where F: Fn(Vec<u8>) -> bool
+    {
+        // Compare-and-swap loop
+        loop {
+            let current_ptr = self.extrema[extremum].load(atomic::Ordering::Relaxed);
+
+            let current_value = self.get_by_ptr(current_ptr)?;
+            if !f(current_value) {
+                return Ok(());
+            }
+
+            let swap_ptr = self.extrema[extremum].compare_and_swap(current_ptr, ptr, atomic::Ordering::Relaxed);
+
+            if swap_ptr == current_ptr {
+                return Ok(());
+            }
+        }
     }
 
     /// Flushes all pending writes to disk
