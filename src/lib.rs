@@ -36,6 +36,7 @@ extern crate bincode;
 mod header;
 mod io;
 mod values;
+mod timer;
 mod hashstore;
 
 pub use hashstore::{HashStoreError, HashStore, SearchDepth};

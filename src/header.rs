@@ -11,7 +11,7 @@ pub struct Header {
     magic_file_id: u64,
     pub root_bits: u8,
     _reserved:     [u8;7],
-    pub extrema:   [u64; 8],
+    pub extrema:   [u64;8],
     pub stats:     [u64;8]
 }
 

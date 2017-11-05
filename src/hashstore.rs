@@ -6,6 +6,7 @@ use std::sync::atomic;
 
 use std::{io, fs, mem, path};
 use std::io::Write;
+use timer::Timer;
 use header;
 
 use io::*;
@@ -53,8 +54,9 @@ impl SearchDepth {
 
 enum HashStoreStats {
     Elements = 0,
-    Dependencies = 1,
-    SolvedDependencies = 2
+    WriteTime = 1,
+    ReadTime = 2,
+
 }
 
 
@@ -68,8 +70,7 @@ enum HashStoreStats {
 /// let hs = hashstore::HashStore::new("test", 24);
 ///
 pub struct HashStore {
-    // 3 handles to the same file
-    _mmap_file:  fs::File,
+    // 2 handles to the same file
     rw_file:     fs::File,
     append_file: fs::File,
 
@@ -81,7 +82,6 @@ pub struct HashStore {
 
     root_bits: u8,
 }
-
 
 
 impl HashStore {
@@ -108,7 +108,7 @@ impl HashStore {
             f.set_len(mem::size_of::<header::Header>() as u64 + root_count * 8)?;
         }
 
-        // open 3 handles
+        // open 2 handles
         let mut rw_file   = fs::OpenOptions::new().read(true).write(true).open(&file_name)?;
         let mmap_file     = fs::OpenOptions::new().read(true).write(true).open(&file_name)?;
         let append_file   = fs::OpenOptions::new().append(true).open(&file_name)?;
@@ -126,11 +126,12 @@ impl HashStore {
 
         // setup memmap
         let mut mmap = memmap::Mmap::open_with_offset(
-            &mmap_file,
+             &mmap_file,
             memmap::Protection::ReadWrite,
             0,
             mem::size_of::<header::Header>() + 8 * root_count
         )?;
+
 
 
         let u64_ptr = mmap.mut_ptr() as *mut atomic::AtomicU64;
@@ -138,12 +139,11 @@ impl HashStore {
 
         // split our memmap in the root hash-table and stats
         let root = &u64_slice[header::header_size_u64()..];
-        let stats = &u64_slice[header::stats_offset_u64()..(header::header_size_u64() - header::stats_offset_u64())];
-        let extrema = &u64_slice[header::extrema_offset_u64()..(header::stats_offset_u64() - header::extrema_offset_u64())];
+        let stats = &u64_slice[header::stats_offset_u64()..header::header_size_u64()];
+        let extrema = &u64_slice[header::extrema_offset_u64()..header::stats_offset_u64()];
 
         Ok(HashStore {
             _mmap: mmap,
-            _mmap_file: mmap_file,
             root: root,
             stats: stats,
             extrema: extrema,
@@ -172,6 +172,8 @@ impl HashStore {
     /// `time < x` is encountered
     pub fn exists(&mut self, key: &[u8; 32], depth: SearchDepth) -> Result<Option<ValuePtr>, HashStoreError>
     {
+        let _timer = Timer::new(&self.stats[HashStoreStats::ReadTime as usize]);
+
         let idx     = get_root_index(self.root_bits, &key);
         let mut ptr = self.root[idx].load(atomic::Ordering::Relaxed);
 
@@ -202,6 +204,8 @@ impl HashStore {
     /// If it is too small, a second read is performed
     pub fn get_by_ptr(&mut self, ptr: ValuePtr) -> Result<Vec<u8>, HashStoreError>
     {
+        let _timer = Timer::new(&self.stats[HashStoreStats::ReadTime as usize]);
+
         let (prefix, mut content) = read_value_start(&mut self.rw_file, ptr, None)?;
         read_value_finish(&mut self.rw_file, &prefix, &mut content)?;
         Ok(content)
@@ -214,6 +218,8 @@ impl HashStore {
     /// `time < x` is encountered.
     pub fn get(&mut self, key: [u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
     {
+        let _timer = Timer::new(&self.stats[HashStoreStats::ReadTime as usize]);
+
         let idx = get_root_index(self.root_bits, &key);
 
         let mut ptr = self.root[idx].load(atomic::Ordering::Relaxed);
@@ -246,11 +252,13 @@ impl HashStore {
     /// and is used to query only recent keys
     pub fn set(&mut self, key: &[u8; 32], value: &[u8], time: u32) -> Result<ValuePtr, HashStoreError>
     {
+        let _timer = Timer::new(&self.stats[HashStoreStats::WriteTime as usize]);
+
         let idx = get_root_index(self.root_bits, key);
 
         // Compare-and-swap loop
         loop {
-            let old_ptr = self.root[idx].load(atomic::Ordering::Relaxed);
+            let old_ptr = self.root[idx].load(atomic::Ordering::Acquire);
 
             let prefix = ValuePrefix {
                 key: *key,
@@ -263,7 +271,7 @@ impl HashStore {
             let new_ptr = write_value(&mut self.append_file, prefix, value)?;
 
             let swap_ptr = self.root[idx].compare_and_swap
-                (old_ptr, new_ptr, atomic::Ordering::Relaxed);
+                (old_ptr, new_ptr, atomic::Ordering::Release);
 
             if swap_ptr == old_ptr {
                 self.stats_add(HashStoreStats::Elements, 1);
@@ -284,6 +292,8 @@ impl HashStore {
     ///
     /// The caller must also ensure that the update is within the bounds of the value
     pub fn update(&mut self, ptr: ValuePtr, value: &[u8], position: usize) -> Result<(), HashStoreError> {
+        let _timer = Timer::new(&self.stats[HashStoreStats::WriteTime as usize]);
+
         update_value(&mut self.rw_file, ptr, value, position + mem::size_of::<header::Header>())?;
         Ok(())
     }
@@ -300,14 +310,14 @@ impl HashStore {
     {
         // Compare-and-swap loop
         loop {
-            let current_ptr = self.extrema[extremum].load(atomic::Ordering::Relaxed);
+            let current_ptr = self.extrema[extremum].load(atomic::Ordering::Acquire);
 
             let current_value = self.get_by_ptr(current_ptr)?;
             if !f(current_value) {
                 return Ok(());
             }
 
-            let swap_ptr = self.extrema[extremum].compare_and_swap(current_ptr, ptr, atomic::Ordering::Relaxed);
+            let swap_ptr = self.extrema[extremum].compare_and_swap(current_ptr, ptr, atomic::Ordering::Release);
 
             if swap_ptr == current_ptr {
                 return Ok(());
