@@ -211,12 +211,30 @@ impl HashStore {
         Ok(content)
     }
 
+    /// Writes a value without key; this can only be accessed by ValuePtr using get_value
+    ///
+    pub fn set_value(&mut self, value: &[u8]) -> Result<ValuePtr, HashStoreError>
+    {
+        let _timer = Timer::new(&self.stats[HashStoreStats::WriteTime as usize]);
+
+        write_value_no_prefix(&mut self.rw_file, value)
+    }
+
+    /// Writes a value without key; this can only be accessed by ValuePtr using get_value
+    ///
+    pub fn get_value(&mut self, ptr: ValuePtr) -> Result<Vec<u8>, HashStoreError>
+    {
+        let _timer = Timer::new(&self.stats[HashStoreStats::WriteTime as usize]);
+
+        read_value_no_prefix(&mut self.rw_file, ptr)
+    }
+
 
     /// Checks if `key` exists and returns the value if it does
     ///
     /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
     /// `time < x` is encountered.
-    pub fn get(&mut self, key: [u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
+    pub fn get(&mut self, key: &[u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
     {
         let _timer = Timer::new(&self.stats[HashStoreStats::ReadTime as usize]);
 
@@ -233,7 +251,7 @@ impl HashStore {
 
             let (prefix, mut value) = read_value_start(&mut self.rw_file, ptr, None)?;
 
-            if prefix.key == key {
+            if prefix.key == *key {
                 read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
                 return Ok(Some(value));
             }
@@ -312,9 +330,11 @@ impl HashStore {
         loop {
             let current_ptr = self.extrema[extremum].load(atomic::Ordering::Acquire);
 
-            let current_value = self.get_by_ptr(current_ptr)?;
-            if !f(current_value) {
-                return Ok(());
+            if current_ptr != 0 {
+                let current_value = self.get_by_ptr(current_ptr)?;
+                if !f(current_value) {
+                    return Ok(());
+                }
             }
 
             let swap_ptr = self.extrema[extremum].compare_and_swap(current_ptr, ptr, atomic::Ordering::Release);
@@ -323,6 +343,16 @@ impl HashStore {
                 return Ok(());
             }
         }
+    }
+
+    pub fn get_extremum(&mut self, extremum: usize) -> Result<Option<[u8;32]>, HashStoreError> {
+        let ptr = self.extrema[extremum].load(atomic::Ordering::Relaxed);
+        if ptr == 0 {
+            return Ok(None);
+        }
+        let (prefix, _) = read_value_start(&mut self.rw_file, ptr, Some(0))?;
+        Ok(Some(prefix.key))
+
     }
 
     /// Flushes all pending writes to disk

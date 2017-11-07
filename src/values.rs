@@ -6,8 +6,7 @@
 /// It contains the bitfields:
 ///
 /// * bit 0-47   file position
-/// * bit 48-51  size of object: X such that size is at most 1 << (X+5) bytes
-/// * bit 52     bit set if this or any object in further in this object chain is a dependency
+/// * bit 48-53  size of object: X such that size is at most 1 << X bytes
 ///
 /// This mod are some helper functions to encode/decode dataptrs
 
@@ -28,22 +27,16 @@ pub struct ValuePrefix {
 pub fn ptr_new(filepos: u64, sz: usize) -> ValuePtr {
 
     // compress size: find S such that size is at least 2^(S+6)
-    let s = ((sz as u64)
+    let s = (sz as u64)
         .next_power_of_two()
-        .trailing_zeros() as u64)
-        .saturating_sub(6);
+        .trailing_zeros() as u64;
 
-    if s >= 16 {
-        filepos
-    }
-    else {
-        filepos | (s << 48)
-    }
+    filepos | (s << 48)
 }
 
 // Returns an *estimate* of the size of the object
 pub fn ptr_size_est(dataptr: ValuePtr) -> usize {
-    (1 << (6 + ((dataptr >> 48) & 0xF))) as usize
+    (1 << ((dataptr >> 48) & 0x1F)) as usize
 }
 
 

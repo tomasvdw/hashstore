@@ -21,10 +21,23 @@ pub fn write_value<W: io::Write + io::Seek>(wr: &mut W, prefix: ValuePrefix, con
 
     wr.write_all(&buffer)?;
     let new_pos = wr.seek(io::SeekFrom::Current(0))?
-        - buffer.len() as u64;
+        - content.len() as u64;
 
-    Ok(ptr_new(new_pos, buffer.len()))
+    Ok(ptr_new(new_pos, content.len()))
 }
+
+// write a value without prefix
+pub fn write_value_no_prefix<W: io::Write + io::Seek>(wr: &mut W, content: &[u8])
+                                            -> Result<ValuePtr, HashStoreError>
+{
+    wr.write_all(&content)?;
+    let new_pos = wr.seek(io::SeekFrom::Current(0))?
+        - content.len() as u64;
+
+    Ok(ptr_new(new_pos, content.len()))
+}
+
+
 
 // Writes part of a value
 pub fn update_value<W: io::Write + io::Seek>(wr: &mut W, ptr: ValuePtr, content: &[u8], position: usize)
@@ -44,11 +57,10 @@ pub fn read_value_start<R: io::Read + io::Seek>(rd: &mut R, ptr: ValuePtr, size_
     -> Result<(ValuePrefix, Vec<u8>), HashStoreError>
 {
     // use either passed `size_needed` or estimate from ptr
-    let read_size = size_needed.map_or_else(
-        || ptr_size_est(ptr),
-        |x| x + mem::size_of::<ValuePrefix>());
+    let prefix_size = mem::size_of::<ValuePrefix>();
+    let read_size = prefix_size + size_needed.unwrap_or(ptr_size_est(ptr));
 
-    rd.seek(io::SeekFrom::Start(ptr_file_pos(ptr)))?;
+    rd.seek(io::SeekFrom::Start(ptr_file_pos(ptr) - prefix_size as u64))?;
     let mut buffer = vec![0u8; read_size];
 
     if let Err(e) = rd.read_exact(&mut buffer) {
@@ -82,6 +94,27 @@ pub fn read_value_finish<R: io::Read>(rd: &mut R, prefix: &ValuePrefix, content:
     Ok(())
 }
 
+
+// reads a value without prefix
+pub fn read_value_no_prefix<R: io::Read + io::Seek>(rd: &mut R, ptr: ValuePtr)
+                                                      -> Result<Vec<u8>, HashStoreError>
+{
+    let read_size = ptr_size_est(ptr);
+
+    rd.seek(io::SeekFrom::Start(ptr_file_pos(ptr)))?;
+    let mut buffer = vec![0u8; read_size];
+
+    if let Err(e) = rd.read_exact(&mut buffer) {
+        // EOF can happen as the size from datapos can be bigger
+        // than the actual size; this is solved in read_value_end
+        if e.kind() != io::ErrorKind::UnexpectedEof {
+
+            return Err(HashStoreError::IoError(e));
+        }
+    }
+
+    Ok(buffer)
+}
 
 
 #[cfg(test)]
@@ -124,7 +157,7 @@ mod tests {
         let mut fw = fs::OpenOptions::new().append(true).open("./testdb/io").unwrap();
 
         // small power of two should work in one go
-        let (ptr, v) = do_write(&mut fw, 256 - ::std::mem::size_of::<ValuePrefix>());
+        let (ptr, v) = do_write(&mut fw, 256 );
         let (_, res) = read_value_start(&mut fr, ptr, None).unwrap();
         assert_eq!(&res, &v);
 
@@ -137,10 +170,10 @@ mod tests {
         read_value_finish(&mut fr, &prefix, &mut res).unwrap();
         assert_eq!(&res[0..v.len()], &v[..]);
 
-        // larger than 2mb needs another read
+        // larger than passed size_needing needs another read
         // a bit larger needs truncating
         let (ptr, v) = do_write(&mut fw, 5_000_000);
-        let (prefix, mut res) = read_value_start(&mut fr, ptr, None).unwrap();
+        let (prefix, mut res) = read_value_start(&mut fr, ptr, Some(1000)).unwrap();
         assert_ne!(&res, &v);
         read_value_finish(&mut fr, &prefix, &mut res).unwrap();
         assert_eq!(&res, &v);

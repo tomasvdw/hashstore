@@ -82,7 +82,7 @@ fn test_big() {
     let tm = Instant::now();
     for (k, _) in b1.into_iter() {
 
-        let _ = hs.get(k, SearchDepth::FullSearch).unwrap().unwrap();
+        let _ = hs.get(&k, SearchDepth::FullSearch).unwrap().unwrap();
 
     }
     println!("block 1 {} lookups in {}ms", l, ms(tm));
@@ -104,7 +104,7 @@ fn test_big() {
     let tm = Instant::now();
     for (k, _) in b1.into_iter() {
 
-        let _ = hs.get(k, SearchDepth::FullSearch).unwrap().unwrap();
+        let _ = hs.get(&k, SearchDepth::FullSearch).unwrap().unwrap();
 
     }
     println!("block 1 {} lookups in {}ms", l, ms(tm));
@@ -122,7 +122,7 @@ fn test_big() {
     let tm = Instant::now();
     for (k, _) in b1.into_iter() {
 
-        let _ = hs.get(k, SearchDepth::FullSearch).unwrap().unwrap();
+        let _ = hs.get(&k, SearchDepth::FullSearch).unwrap().unwrap();
 
     }
     println!("block 1 {} lookups in {}ms", l, ms(tm));
@@ -130,7 +130,7 @@ fn test_big() {
     let l = blockend.len();
     for (k, _) in blockend.into_iter() {
 
-        let _ = hs.get(k, SearchDepth::FullSearch).unwrap().unwrap();
+        let _ = hs.get(&k, SearchDepth::FullSearch).unwrap().unwrap();
 
     }
     println!("block end {} lookups in {}ms", l, ms(tm));
