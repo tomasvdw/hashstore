@@ -234,7 +234,10 @@ impl HashStore {
     ///
     /// If `depth` is `SearchDepth::SearchAfter(x)` the search is abandoned after an element with
     /// `time < x` is encountered.
-    pub fn get(&mut self, key: &[u8; 32], depth: SearchDepth) -> Result<Option<Vec<u8>>, HashStoreError>
+    ///
+    /// If found it returns Some((ValuePtr, Vec<u8>)) where ValuePtr is a persistent pointer to where
+    /// the value was found
+    pub fn get(&mut self, key: &[u8; 32], depth: SearchDepth) -> Result<Option<(ValuePtr, Vec<u8>)>, HashStoreError>
     {
         let _timer = Timer::new(&self.stats[HashStoreStats::ReadTime as usize]);
 
@@ -253,7 +256,7 @@ impl HashStore {
 
             if prefix.key == *key {
                 read_value_finish(&mut self.rw_file, &prefix, &mut value)?;
-                return Ok(Some(value));
+                return Ok(Some((ptr,value)));
             }
 
             if !depth.check(prefix.time) {
